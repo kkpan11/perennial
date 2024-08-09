@@ -82,6 +82,21 @@ Section goose_lang.
       auto.
   Qed.
 
+  Theorem struct_pointsto_not_null l q t v :
+    0 < ty_size t →
+    l ↦[t]{#q} v -∗ ⌜l ≠ null⌝.
+  Proof.
+    unseal.
+    iIntros (?) "[Hvals %Hval_ty]".
+    apply val_ty_len in Hval_ty.
+    destruct (flatten_struct v); simpl in *.
+    - lia.
+    - iDestruct "Hvals" as "[Hl _]".
+      iDestruct (heap_pointsto_non_null with "Hl") as %Hnull.
+      rewrite loc_add_0 in Hnull.
+      auto.
+  Qed.
+
   Local Lemma struct_pointsto_agree_flatten l t q1 v1 q2 v2 :
     length (flatten_struct v1) = length (flatten_struct v2) ->
     l ↦[t]{q1} v1 -∗ l ↦[t]{q2} v2 -∗
@@ -239,22 +254,89 @@ Section goose_lang.
     rewrite Z2Nat.id; auto.
   Qed.
 
+
+  (* these are pretty much definitionally equal *)
+  Lemma pointsto_vals_to_struct_pointsto t l dq v :
+    val_ty v t →
+    pointsto_vals l dq (flatten_struct v) -∗
+    l ↦[t]{dq} v.
+  Proof.
+    iIntros (Hty) "Hl".
+    rewrite /pointsto_vals.
+    unseal.
+    auto.
+  Qed.
+
+  Lemma pointsto_vals_toks_split1 t l dq v :
+    val_ty v t →
+    0 ≠ ty_size t →
+    pointsto_vals_toks l dq (flatten_struct v) -∗
+    pointsto_vals l dq (flatten_struct v) ∗ meta_token l ⊤.
+  Proof.
+    iIntros (Hty Hnon_zero) "Hl_toks".
+    assert (∃ v0 v', flatten_struct v = v0 :: v') as (v0 & v' & ->).
+    { destruct (flatten_struct v) eqn:Heq; [ | by eauto ].
+      exfalso.
+      pose proof (val_ty_len Hty) as H.
+      rewrite Heq /= in H.
+      pose proof (ty_size_ge_0 t).
+      lia. }
+    rewrite /pointsto_vals_toks /pointsto_vals.
+    simpl.
+    iDestruct "Hl_toks" as "[[Hl0 Htok] Hl]".
+    rewrite loc_add_0.
+    iFrame "Hl0 Htok".
+    iApply (big_sepL_impl with "Hl").
+    iIntros "!>" (k x Hget) "[$ _]".
+  Qed.
+
   (* this is the core reasoning, not intended for external use *)
   Local Theorem wp_AllocAt t stk E v :
     val_ty v t ->
     {{{ True }}}
       ref v @ stk; E
-    {{{ l, RET #l; l ↦[t] v }}}.
+    {{{ l, RET #l; l ↦[t] v ∗ (⌜0 < ty_size t⌝ -∗ meta_token l ⊤) }}}.
   Proof.
     iIntros (Hty Φ) "_ HΦ".
-    wp_apply wp_allocN_seq; first by word.
-    change (uint.nat 1) with 1%nat; simpl.
-    iIntros (l) "[Hl _]".
-    iApply "HΦ".
-    unseal.
-    iSplitL; auto.
+    destruct (decide (ty_size t = 0)).
+    { wp_apply wp_allocN_seq; first by word.
+      change (uint.nat 1) with 1%nat; simpl.
+      iIntros (l) "[Hl _]".
+      iApply "HΦ".
+      rewrite Z.mul_0_r loc_add_0.
+      iSplitL.
+      - iApply (pointsto_vals_to_struct_pointsto with "Hl"); auto.
+      - iIntros (?); lia. }
+
+    wp_apply wp_allocN_seq_sized_meta.
+    { erewrite val_ty_len; eauto.
+      pose proof (ty_size_ge_0 t).
+      lia. }
+    { word. }
+    iIntros (l) "(%Hl & Hblock & Hl)".
+    change (seq 0 (uint.nat (W64 1))) with [0%nat]; simpl.
     rewrite Z.mul_0_r loc_add_0.
-    iFrame.
+    iDestruct "Hl" as "[Hl _]".
+
+    iApply "HΦ".
+    iDestruct (pointsto_vals_toks_split1 with "Hl") as "[Hl $]"; eauto.
+    iDestruct (pointsto_vals_to_struct_pointsto with "Hl") as "$"; first done.
+    auto.
+  Qed.
+
+  Theorem wp_ref_to_meta t stk E v :
+    val_ty v t ->
+    0 < ty_size t ->
+    {{{ True }}}
+      ref_to t v @ stk; E
+    {{{ l, RET #l; l ↦[t] v ∗ meta_token l ⊤ }}}.
+  Proof.
+    iIntros (Hty Hty_gt0 Φ) "_ HΦ".
+    wp_rec. wp_pures.
+    wp_apply (wp_AllocAt t); auto.
+    iIntros (l) "[Hl Htok]".
+    iApply "HΦ"; iFrame.
+    iApply "Htok"; auto.
   Qed.
 
   Theorem wp_ref_to t stk E v :
@@ -266,9 +348,10 @@ Section goose_lang.
     iIntros (Hty Φ) "_ HΦ".
     wp_rec. wp_pures.
     wp_apply (wp_AllocAt t); auto.
+    iIntros (l) "[Hl _]".
+    iApply "HΦ"; iFrame.
   Qed.
 
-  (* TODO: this is only because Goose doesn't use ref_zero *)
   Theorem wp_ref_of_zero stk E t :
     has_zero t ->
     {{{ True }}}
@@ -276,18 +359,10 @@ Section goose_lang.
     {{{ l, RET #l; l ↦[t] (zero_val t) }}}.
   Proof.
     iIntros (Hzero Φ) "_ HΦ".
-    wp_apply (wp_AllocAt t); eauto.
-  Qed.
-
-  Theorem wp_ref_zero stk E t :
-    has_zero t ->
-    {{{ True }}}
-      ref_zero t #() @ stk; E
-    {{{ l, RET #l; l ↦[t] (zero_val t) }}}.
-  Proof.
-    iIntros (Hzero Φ) "_ HΦ".
-    wp_rec. wp_pures.
-    wp_apply wp_ref_of_zero; eauto.
+    wp_apply (wp_AllocAt t).
+    { apply zero_val_ty'; done. }
+    iIntros (l) "[Hl Htok]".
+    iApply "HΦ"; iFrame.
   Qed.
 
   Theorem wp_LoadAt stk E q l t v :

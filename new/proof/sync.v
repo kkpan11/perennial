@@ -111,10 +111,19 @@ Proof.
     eauto with iFrame.
 Qed.
 
-Lemma wp_Mutex__Unlock m R :
-  {{{ is_Mutex m R ∗ own_Mutex m ∗ ▷ R }}} Mutex__Unlock #m #() {{{ RET #(); True }}}.
+(* this form is useful for defer statements *)
+Lemma wp_Mutex__Unlock' m :
+  {{{ True }}}
+    Mutex__Unlock #m
+  {{{ (f : val), RET f;
+      ∀ R,
+    {{{ is_Mutex m R ∗ own_Mutex m ∗ ▷ R }}} f #() {{{ RET #(); True }}}
+  }}}.
 Proof.
-  iIntros (Φ) "(#Hinv & Hlocked & HR) HΦ".
+  iIntros (Ψ) "_ HΨ".
+  wp_rec. wp_pures.
+  iApply "HΨ". iModIntro. iIntros (R).
+  iIntros (Φ) "!# (#Hinv & Hlocked & HR) HΦ".
   wp_rec.
   wp_pures.
   wp_bind (CmpXchg _ _ _).
@@ -136,28 +145,61 @@ Proof.
   iNext. iExists false. iFrame.
 Qed.
 
-(** This means [c] is a condvar with underyling Mutex at address [m]. *)
-Definition is_Cond (c : loc) (m : loc) : iProp Σ :=
-  readonly (c ↦ #m).
+Lemma wp_Mutex__Unlock m R :
+  {{{ is_Mutex m R ∗ own_Mutex m ∗ ▷ R }}} Mutex__Unlock #m #() {{{ RET #(); True }}}.
+Proof.
+  iIntros (Φ) "(#Hinv & Hlocked & HR) HΦ".
+  wp_apply wp_Mutex__Unlock'. iIntros (?) "Hspec".
+  wp_apply ("Hspec" with "[$Hinv $Hlocked $HR]").
+  by iApply "HΦ".
+Qed.
+
+Definition is_Locker (v : val) (P : iProp Σ) : iProp Σ :=
+  "#H_Lock" ∷ ({{{ True }}} (interface.get "Lock" v) #() {{{ RET #(); P }}}) ∗
+  "#H_Unlock" ∷ ({{{ P }}} (interface.get "Unlock" v) #() {{{ RET #(); True }}})
+.
+
+Global Instance is_Locker_persistent v P : Persistent (is_Locker v P) := _.
+
+Lemma Mutex_is_Locker (m : loc) R :
+  is_Mutex m R -∗
+  is_Locker (interface.val Mutex__mset_ptr #m) (own_Mutex m ∗ R).
+Proof.
+  iIntros "#?".
+  iSplitL.
+  - iIntros (?) "!# _ HΦ".
+    wp_pures.
+    by wp_apply (wp_Mutex__Lock with "[$]").
+  - iIntros (?) "!# [? ?] HΦ".
+    wp_pures.
+    wp_apply (wp_Mutex__Unlock with "[-HΦ]").
+    { iFrame "#∗". }
+    by iApply "HΦ".
+Qed.
+
+(** This means [c] is a condvar with underyling Locker at address [m]. *)
+Definition is_Cond (c : loc) (m : val) : iProp Σ :=
+  c ↦[interfaceT]□ m.
 
 Global Instance is_Cond_persistent c m : Persistent (is_Cond c m) := _.
 
-Theorem wp_NewCond (m : loc) :
+Theorem wp_NewCond (m : val) :
+  has_go_type m interfaceT →
   {{{ True }}}
-    NewCond #m
+    NewCond m
   {{{ (c: loc), RET #c; is_Cond c m }}}.
 Proof.
+  intros Hty.
   iIntros (Φ) "Hl HΦ".
   wp_rec. wp_pures. wp_apply wp_fupd.
-  wp_apply wp_alloc_untyped; [ auto | ].
-  iIntros (c) "Hc".
-  iMod (readonly_alloc_1 with "Hc") as "Hcond".
+  wp_alloc c as "Hc".
   wp_pures.
-  iApply "HΦ". by iFrame.
+  iApply "HΦ". iMod (typed_pointsto_persist with "Hc") as "$".
+  done.
 Qed.
 
-Theorem wp_Cond__Signal c m :
-  {{{ is_Cond c m }}}
+Theorem wp_Cond__Signal c lk :
+  {{{ is_Cond c lk }}}
     Cond__Signal #c #()
   {{{ RET #(); True }}}.
 Proof.
@@ -177,24 +219,22 @@ Proof.
 Qed.
 
 Theorem wp_Cond__Wait c m R :
-  {{{ is_Cond c m ∗ is_Mutex m R ∗ own_Mutex m ∗ R }}}
+  {{{ is_Cond c m ∗ is_Locker m R ∗ R }}}
     Cond__Wait #c #()
-  {{{ RET #(); own_Mutex m ∗ R }}}.
-Proof using syncG0. (* XXX: not sure which part of the proof uses syncG, but also don't care. *)
-  iIntros (Φ) "(#Hcond&#Hlock&Hlocked&HR) HΦ".
+  {{{ RET #(); R }}}.
+Proof.
+  iIntros (Φ) "(#Hcond&#Hlock&HR) HΦ".
   unfold Cond__Wait.
   wp_pures.
-
-  iMod (readonly_load with "Hcond") as (q) "Hc".
-  wp_untyped_load.
-  wp_apply (wp_Mutex__Unlock with "[$Hlock $Hlocked $HR]").
+  iNamed "Hlock". iNamed "Hcond".
+  wp_load.
+  wp_apply ("H_Unlock" with "[$]").
   wp_pures.
-  wp_untyped_load.
-  wp_apply (wp_Mutex__Lock with "[$Hlock]").
-  iIntros "(Hlocked&HR)".
+  wp_load.
+  wp_apply ("H_Lock" with "[$]").
+  iIntros "HR".
   wp_pures.
-  iApply "HΦ". iModIntro.
-  iFrame.
+  iApply "HΦ". done.
 Qed.
 
 Record waitgroup_names :=
@@ -315,5 +355,5 @@ End proof.
 End goose_lang.
 
 Typeclasses Opaque is_Mutex own_Mutex
-            is_Cond
+            is_Locker is_Cond
             is_WaitGroup own_WaitGroup own_WaitGroup_token own_free_WaitGroup.

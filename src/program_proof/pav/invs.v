@@ -3,10 +3,17 @@ From Perennial.program_proof Require Import grove_prelude.
 From Perennial.program_proof.pav Require Import common cryptoffi merkle rpc.
 From iris.unstable.base_logic Require Import mono_list.
 From Perennial.base_logic.lib Require Import ghost_map.
-From Perennial.algebra Require Import ghost_map_pers.
+
+Section shared.
+Class pavG Σ :=
+  {
+    mono_trees :> mono_listG gname Σ;
+    tree_maps :> ghost_mapG Σ (list w8) (list w8);
+  }.
+End shared.
 
 Section epochChain.
-Context `{!heapGS Σ}.
+Context `{!heapGS Σ, !pavG Σ}.
 
 Definition chainSepNone_hashes_to h : iProp Σ :=
   is_hash [(W8 0)] h.
@@ -31,7 +38,7 @@ Proof. Admitted.
 End epochChain.
 
 Section global_inv.
-Context `{!heapGS Σ, !mono_listG gname Σ, !ghost_mapG Σ (list w8) (list w8)}.
+Context `{!heapGS Σ, !pavG Σ}.
 (* state is tied together as follows, all from one γ:
 γ →[mono_list]
 γtrees →[ghost_map_auth]
@@ -39,19 +46,28 @@ trees →[is_tree_dig]
 digs →[binds]
 links. *)
 Definition global_inv γ : iProp Σ :=
+  ∃ γtrees trees,
+  (* γ commits to all the tree γs, including the next tr. *)
+  "HmonoTrees" ∷ mono_list_auth_own γ (1/2) γtrees ∗
+  "Htree_views" ∷ ([∗ list] γtr; tr ∈ γtrees; trees,
+    ghost_map_auth γtr (1/2) tr).
+(*
+Definition global_inv γ : iProp Σ :=
   ∃ γtrees trees updates digs links,
   "HmonoTrees" ∷ mono_list_auth_own γ (1/2) γtrees ∗
   "Htree_views" ∷ ([∗ list] γtr; tr ∈ γtrees; (trees ++ [updates]),
     ghost_map_auth γtr (1/2) tr) ∗
   "#Hdigs" ∷ ([∗ list] tr; dig ∈ trees; digs, is_tree_dig tr dig) ∗
   "#Hdigs_links" ∷ binds digs links.
+*)
 End global_inv.
 
 Section serv_sigpreds.
-Context `{!heapGS Σ, !mono_listG gname Σ, !ghost_mapG Σ (list w8) (list w8)}.
+Context `{!heapGS Σ, !pavG Σ}.
 
 Definition serv_sigpred_link γ (data : servSepLink.t) : iProp Σ :=
   ∃ (epoch : w64) (prevLink dig : list w8) γtrees trees digs links,
+  (* TODO: maybe not need prevLink and dig. doesn't show up anywhere. *)
   "#Hbind" ∷ is_hash (chainSepSome.encodesF (chainSepSome.mk epoch prevLink dig)) data.(servSepLink.link) ∗
   "#HmonoIdx" ∷ mono_list_lb_own γ γtrees ∗
   "#Htree_views" ∷ ([∗ list] γtr; tr ∈ γtrees; trees,

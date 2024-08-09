@@ -217,7 +217,7 @@ Proof.
     iIntros "Hm".
     iApply "HΦ".
     replace (uint.nat (word.add i 1)) with (1 + uint.nat i)%nat by word.
-    destruct (list_lookup_lt _ log (uint.nat i)) as [u Hlookup']; first by word.
+    destruct (list_lookup_lt log (uint.nat i)) as [u Hlookup']; first by word.
     iDestruct (big_sepL2_lookup_acc with "Hblocks") as "[[%Huaddr Hb] Hblocks]"; eauto.
     iSpecialize ("Hblocks" with "[$Hb //]").
     iFrame "Hblocks".
@@ -865,7 +865,7 @@ Proof.
   iDestruct (big_sepL2_length with "Hblocks") as %Hbks_len.
   autorewrite with len in Hbks_len.
   fold (slidingM.numMutable σ).
-  change (uint64T * (blockT * unitT))%ht with (struct.t Update).
+  change (uint64T * (disk.blockT * unitT))%ht with (struct.t Update).
   set (s':=slice_take logSlice (slidingM.numMutable σ)).
   iDestruct (own_slice_small_sz with "Hs") as %Hsz.
   autorewrite with len in Hsz.
@@ -1098,7 +1098,7 @@ Proof.
     assert ((uint.nat i) <
       length (take (uint.nat (word.sub newStart σ.(slidingM.start))) σ.(slidingM.log))
     )%nat as Hlt' by (rewrite take_length; word).
-    destruct (list_lookup_lt _ _ _ Hlt') as (upd & Hupd).
+    destruct (list_lookup_lt _ _ Hlt') as (upd & Hupd).
     clear Hlt'.
     iDestruct (big_sepL2_lookup_acc with "Hbks") as "[[%Huaddr Hb] Hbks]"; eauto.
     iAssert (is_update uv (DfracOwn q) upd) with "[Hb]" as "Hbk"; first by (iFrame; eauto).
@@ -1203,7 +1203,7 @@ Proof.
                          log)) -∗
     (updates_slice_frag
        (slice_take
-          (slice_skip logSlice (uint64T * (blockT * unitT)%ht)
+          (slice_skip logSlice (uint64T * (disk.blockT * unitT)%ht)
              (word.sub newStart start))
           (word.sub mutable newStart)) (DfracOwn q)
        (take (uint.nat (word.sub mutable newStart))

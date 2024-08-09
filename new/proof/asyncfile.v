@@ -116,7 +116,7 @@ Definition own_AsyncFile_ghost N γ P fname data idx durableIndex (closeRequeste
                 True)
 .
 
-Definition own_AsyncFile_internal f N γ P mu : iProp Σ :=
+Definition own_AsyncFile_internal f N γ P lk : iProp Σ :=
   ∃ data_sl fname (data:list u8) (idx durableIndex : u64) (indexCond durableIndexCond closedCond : loc)
     (closed closeRequested : bool) ,
   "#Hfilename" ∷ f ↦s[AsyncFile :: "filename"]□ #(str fname) ∗
@@ -131,8 +131,8 @@ Definition own_AsyncFile_internal f N γ P mu : iProp Σ :=
   "Hclosed" ∷ f ↦s[AsyncFile :: "closed"] #closed ∗
   "HclosedCond" ∷ f ↦s[AsyncFile :: "closedCond"] #closedCond ∗
 
-  "#HindexCond_is" ∷ is_Cond indexCond mu ∗
-  "#HdurableIndexCond_is" ∷ is_Cond durableIndexCond mu ∗
+  "#HindexCond_is" ∷ is_Cond indexCond lk ∗
+  "#HdurableIndexCond_is" ∷ is_Cond durableIndexCond lk ∗
 
   "Hghost" ∷ own_AsyncFile_ghost N γ P fname data idx durableIndex closeRequested closed ∗
   "%HnoClose" ∷  ⌜ closeRequested = false ⌝ (* TODO: don't want to prove close()
@@ -143,7 +143,7 @@ Definition own_AsyncFile_internal f N γ P mu : iProp Σ :=
 Definition is_AsyncFile (N:namespace) (f:loc) γ P : iProp Σ :=
   ∃ (mu : loc),
   "#Hmu" ∷ f ↦s[AsyncFile :: "mu"]□ #mu ∗
-  "#HmuInv" ∷ is_Mutex mu (own_AsyncFile_internal f N γ P mu)
+  "#HmuInv" ∷ is_Mutex mu (own_AsyncFile_internal f N γ P (interface.val Mutex__mset_ptr #mu))
 .
 
 Definition own_AsyncFile (N:namespace) (f:loc) γ (P: list u8 → iProp Σ) (data:list u8) : iProp Σ :=
@@ -207,14 +207,27 @@ Proof.
   wp_pures.
   iNamed "H".
   iNamed "His".
-  wp_apply wp_ref_ty. { repeat econstructor. }
-  iIntros (index_addr) "Hlocal1". wp_pures.
+  iDestruct (Mutex_is_Locker with "[$]") as "#Hlk".
+  wp_apply wp_with_defer.
+  iIntros (defer) "Hdefer". simpl subst. wp_pures.
+
+  wp_bind (ref_ty _ _).
   wp_apply wp_ref_ty. { repeat econstructor. }
   iIntros (s_addr) "Hlocal2". wp_pures.
+  wp_apply wp_ref_ty. { repeat econstructor. }
+  iIntros (index_addr) "Hlocal1". wp_pures.
   wp_load. wp_pures.
   wp_pures. wp_load. wp_pures.
   wp_apply (wp_Mutex__Lock with "[$]").
   iIntros "[Hlocked Hown]".
+  wp_pures.
+  wp_load.
+  wp_load.
+  wp_apply wp_Mutex__Unlock'.
+  iIntros (m_unlock) "#Hunlock".
+  wp_pures.
+  wp_load. wp_store.
+  iMod (typed_pointsto_persist with "Hdefer") as "#?".
   wp_pures.
 
   wp_for.
@@ -230,8 +243,8 @@ Proof.
     wp_pures. wp_load. wp_load.
     wp_apply (wp_Cond__Wait with "[-Htok HΦ Hlocal1 Hlocal2]").
     {
-      iFrame "HdurableIndexCond_is HmuInv Hlocked".
-      repeat iExists _; iFrame "∗#%".
+      iFrame "HdurableIndexCond_is Hlk".
+      iFrame "∗#%".
     }
     iIntros "[Hlocked Hown]".
     wp_pures.
@@ -246,8 +259,8 @@ Proof.
     wp_pures.
     iDestruct (get_write_witness i with "[$]") as "#Hwit".
     { word. }
-    wp_load. wp_load.
-    wp_apply (wp_Mutex__Unlock with "[-Htok HΦ Hlocal1 Hlocal2]").
+    wp_load. wp_pures.
+    wp_apply ("Hunlock" with "[-Htok HΦ Hlocal1 Hlocal2]").
     {
       iFrame "HmuInv Hlocked".
       repeat iExists _; iFrame "∗#%".
@@ -377,6 +390,10 @@ Proof.
   iNamed "Hf".
   iAssert (_) with "His" as "His2".
   iNamed "His2".
+
+  wp_apply wp_with_defer.
+  iIntros (defer) "Hdefer". simpl subst. wp_pures.
+
   wp_apply wp_ref_ty; [econstructor|]. iIntros (data_addr) "Hlocal1". wp_pures.
   wp_apply wp_ref_ty; [econstructor|]. iIntros (s_addr) "Hlocal2". wp_pures.
   wp_load.
@@ -387,8 +404,12 @@ Proof.
   wp_pures.
   wp_load. wp_load.
   wp_pures.
-  wp_store.
-  wp_load. wp_load.
+  wp_apply wp_Mutex__Unlock'.
+  iIntros (m_unlock) "Hunlock".
+  wp_load. wp_store.
+  wp_pures.
+  wp_load. wp_load. wp_store. wp_load.
+  wp_load. wp_pures.
   wp_apply wp_SumAssumeNoOverflow.
   iIntros (Hno_overflow).
   wp_load. wp_store.
@@ -405,8 +426,9 @@ Proof.
   wp_apply wp_Cond__Signal.
   { iFrame "#". }
   wp_pures.
-  wp_load. wp_load.
-  wp_apply (wp_Mutex__Unlock with "[-HΦ Hnoclose Hdat Hesc Hlocal1 Hlocal2 Hlocal3]").
+  wp_load.
+  wp_pures.
+  wp_apply ("Hunlock" with "[-HΦ Hnoclose Hdat Hesc Hlocal1 Hlocal2 Hlocal3]").
   {
     iFrame "HmuInv Hlocked".
     iNext.
@@ -533,9 +555,9 @@ Proof.
     wp_load. wp_load.
     wp_apply (wp_Cond__Wait with "[-HΦ HH Hlocal1]").
     {
-      iFrame "HindexCond_is HmuInv Hlocked".
-      repeat iExists _; iFrame "∗#%".
-      done.
+      iFrame "HindexCond_is".
+      iDestruct (Mutex_is_Locker with "[$]") as "$".
+      iFrame "∗#%". done.
     }
     iIntros "[Hlocked Hown]".
     wp_pures.
@@ -565,6 +587,7 @@ Proof.
 
   iCombine "Hfilename_in Hfilename" gives %[_ H].
   injection H as <-.
+  wp_pures.
   wp_bind (grove_ffi.FileWrite _ _).
   iApply (wpc_wp _ _ _ _ True).
   wpc_apply (wpc_crash_borrow_open_modify with "Hfile").
@@ -712,6 +735,7 @@ Proof.
   iIntros (s) "Hlocal".
   wp_pures.
   wp_load.
+  wp_pures.
   wp_bind (grove_ffi.FileRead _).
   iApply (wpc_wp _ _ _ _ True).
   wpc_apply (wpc_crash_borrow_open with "Hfile").
@@ -732,13 +756,13 @@ Proof.
   wp_pures.
   wp_load.
   wp_pures.
-  wp_apply (wp_NewCond with "[$]").
+  wp_apply (wp_NewCond with "[$]"); [solve_has_go_type|].
   iIntros (?) "#?".
   wp_pures.
-  wp_apply (wp_NewCond with "[$]").
+  wp_apply (wp_NewCond with "[$]"); [solve_has_go_type|].
   iIntros (?) "#?".
   wp_pures.
-  wp_apply (wp_NewCond with "[$]").
+  wp_apply (wp_NewCond with "[$]"); [solve_has_go_type|].
   iIntros (?) "#?".
   wp_pures.
   wp_apply wp_ref_ty.

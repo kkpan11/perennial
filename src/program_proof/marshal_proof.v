@@ -161,7 +161,7 @@ Proof.
   iIntros (Φ) "Hs HΦ".
   iDestruct (own_slice_split with "Hs") as "[Hs Hcap]".
   wp_rec. wp_pures.
-  wp_apply (typed_mem.wp_AllocAt uint64T); eauto.
+  wp_apply (typed_mem.wp_ref_of_zero); eauto.
   iIntros (off_l) "Hoff".
   wp_pures.
   iModIntro.
@@ -460,7 +460,7 @@ Theorem wp_new_dec stk E s q data r :
 Proof.
   iIntros (Henc Φ) "Hs HΦ".
   wp_rec. wp_pures.
-  wp_apply (typed_mem.wp_AllocAt uint64T); eauto.
+  wp_apply (wp_ref_of_zero); eauto.
   iIntros (off_l) "Hoff".
   wp_pures.
   iApply "HΦ".
@@ -676,7 +676,7 @@ Local Tactic Notation "list_elem" constr(l) constr(i) "as" simple_intropattern(x
            | Z => constr:(Z.to_nat i)
            | u64 => constr:(uint.nat i)
            end in
-  destruct (list_lookup_lt _ l i) as [x H];
+  destruct (list_lookup_lt l i) as [x H];
   [ try solve [ len ]
   | ].
 
@@ -688,8 +688,7 @@ Theorem wp_Dec__GetInts stk E dec_v (xs: list u64) r (n: u64) s q data :
 Proof.
   iIntros (Hlen Φ) "Hdec HΦ".
   wp_rec; wp_pures.
-  wp_apply (typed_mem.wp_AllocAt (slice.T uint64T)).
-  { apply zero_val_ty', has_zero_slice_T. }
+  wp_apply (wp_ref_of_zero); first auto.
   iIntros (s_l) "Hsptr".
   wp_pures.
   wp_apply wp_ref_to; auto.

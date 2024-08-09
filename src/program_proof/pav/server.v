@@ -1,66 +1,158 @@
 From Perennial.program_proof Require Import grove_prelude.
 From Goose.github_com.mit_pdos.pav Require Import ktmerkle.
 
-From Perennial.program_proof.pav Require Import common cryptoffi merkle evidence.
+From Perennial.program_proof.pav Require Import common cryptoffi merkle evidence invs rpc.
 From Perennial.program_proof Require Import std_proof.
 From iris.unstable.base_logic Require Import mono_list.
 From stdpp Require Import gmap.
 From Perennial.base_logic Require Import ghost_map.
 
+Module epochInfo.
+
+Record t :=
+  mk {
+    tree: gmap (list w8) (list w8);
+    prevLink: list w8;
+    dig: list w8;
+    link: list w8;
+    linkSig: list w8;
+  }.
+
+Section defs.
+Context `{!heapGS Σ, !pavG Σ}.
+
+Definition own ptr obj : iProp Σ :=
+  ∃ ptr_tr sl_prevLink sl_dig sl_link sl_linkSig d0 d1 d2 d3,
+  "Htr" ∷ own_Tree ptr_tr obj.(tree) ∗
+  "Hsl_prevLink" ∷ own_slice_small sl_prevLink byteT d0 obj.(prevLink) ∗
+  "Hsl_dig" ∷ own_slice_small sl_dig byteT d1 obj.(dig) ∗
+  "Hsl_link" ∷ own_slice_small sl_link byteT d2 obj.(link) ∗
+  "Hsl_linkSig" ∷ own_slice_small sl_linkSig byteT d3 obj.(linkSig) ∗
+
+  "Hptr_tr" ∷ ptr ↦[epochInfo :: "tree"] #ptr_tr ∗
+  "Hptr_prevLink" ∷ ptr ↦[epochInfo :: "prevLink"] (slice_val sl_prevLink) ∗
+  "Hptr_dig" ∷ ptr ↦[epochInfo :: "dig"] (slice_val sl_dig) ∗
+  "Hptr_link" ∷ ptr ↦[epochInfo :: "link"] (slice_val sl_link) ∗
+  "Hptr_linkSig" ∷ ptr ↦[epochInfo :: "linkSig"] (slice_val sl_linkSig).
+
+Definition valid pk epoch γtree obj : iProp Σ :=
+  "#Hghost_view" ∷ ghost_map_auth_pers γtree obj.(tree) ∗
+  "#Htree_dig" ∷ is_tree_dig obj.(tree) obj.(dig) ∗
+  "#Hbind" ∷ is_hash (chainSepSome.encodesF (chainSepSome.mk epoch obj.(prevLink) obj.(dig))) obj.(link) ∗
+  "#Hvalid_sig" ∷ is_sig pk (servSepLink.encodesF (servSepLink.mk obj.(link))) obj.(linkSig).
+
+End defs.
+End epochInfo.
+
+Module epochChain.
+
+Record t :=
+  mk {
+    epochs: list epochInfo.t;
+  }.
+
+Section defs.
+Context `{!heapGS Σ, !pavG Σ}.
+
+Definition own ptr obj : iProp Σ :=
+  ∃ sl_epochs ptr_epochs,
+  "Hsl_epochs" ∷ own_slice_small sl_epochs ptrT (DfracOwn 1) ptr_epochs ∗
+  "Hptr_epochs" ∷ ptr ↦[epochChain :: "epochs"] (slice_val sl_epochs) ∗
+  "Hsep_epochs" ∷ ([∗ list] ptr_epoch; epoch ∈ ptr_epochs; obj.(epochs),
+    epochInfo.own ptr_epoch epoch).
+
+Definition valid pk γtrees obj : iProp Σ :=
+  "#Hvalid_sep_chain" ∷ ([∗ list] k ↦ γtree; info ∈ γtrees; obj.(epochs),
+    epochInfo.valid pk k γtree info) ∗
+  "#Hbinds_chain" ∷ binds (epochInfo.dig <$> obj.(epochs)) (epochInfo.link <$> obj.(epochs)).
+
+Definition wp_put ptr_chain chain ptr_tree tree sl_sk pk γ γtrees γtree :
+  {{{
+    "Hown_chain" ∷ own ptr_chain chain ∗
+    "#Hvalid_chain" ∷ valid pk γtrees chain ∗
+    "Hown_tree" ∷ own_Tree ptr_tree tree ∗
+    "Hown_sk" ∷ own_sk sl_sk pk (serv_sigpred γ) ∗
+    "#Hpers_updates" ∷ ghost_map_auth_pers γtree tree
+  }}}
+  epochChain__put #ptr_chain #ptr_tree (slice_val sl_sk)
+  {{{
+    new_info, RET #();
+    let new_chain := mk (chain.(epochs) ++ [new_info]) in
+    "%Htr_witness" ∷ ⌜ new_info.(epochInfo.tree) = tree ⌝ ∗
+    "Hown_chain" ∷ own ptr_chain new_chain ∗
+    "#Hvalid_chain" ∷ valid pk (γtrees ++ [γtree]) new_chain ∗
+    "Hown_sk" ∷ own_sk sl_sk pk (serv_sigpred γ)
+  }}}.
+Proof. Admitted.
+
+End defs.
+End epochChain.
+
 Module server.
+
 Record t :=
   mk {
     mu: loc;
-    hon: bool;
-    γmonoLinks: gname;
-    γmonoTrees: gname;
+    γ: gname;
+    sl_sk: Slice.t;
+    pk: list w8;
   }.
 
-Section local_defs.
-Context `{!heapGS Σ, !mono_listG (list w8) Σ, !mono_listG gname Σ, !ghost_mapG Σ (list w8) (list w8)}.
+Section defs.
+Context `{!heapGS Σ, !pavG Σ}.
 
 Definition own ptr obj : iProp Σ :=
-∃ sk sl_ptr_trees ptr_trees trees ptr_updates (updates : gmap (list w8) (list w8)) map_sl_updates ptr_chain digs (links : list (list w8)) sl_linkSigs linkSigs γtrees,
-  "Hsk" ∷ ptr ↦[server :: "sk"] (slice_val sk) ∗
-  "Hown_sk" ∷ own_sk sk (serv_sigpred obj.(γmonoLinks) obj.(γmonoTrees)) obj.(hon) ∗
-  "HlinkSigs" ∷ ptr ↦[server :: "linkSigs"] (slice_val sl_linkSigs) ∗
-  "Hown_linkSigs" ∷ own_Slice2D sl_linkSigs (DfracOwn 1) linkSigs ∗
+  ∃ ptr_updates (updates : gmap (list w8) (list w8)) sl_updates ptr_chain γtrees γupdates chain,
+  (* ghost state, the other half owned by global_inv. *)
+  "HmonoTrees" ∷ mono_list_auth_own obj.(γ) (1/2) (γtrees ++ [γupdates]) ∗
+  (* need ghost_map_auth for next tr bc we're continuously updating it.
+  for older trees, epoch chain has ghost_map_auth_pers. *)
+  "Hupdates_view" ∷ ghost_map_auth γupdates (1/2) updates ∗
 
-  (* hash chain. *)
-  "Hown_chain" ∷ hashChain.own ptr_chain digs links ∗
-  "Hchain" ∷ ptr ↦[server :: "chain"] #ptr_chain ∗
-  "HmonoLinks" ∷ mono_list_auth_own obj.(γmonoLinks) (1/2) (drop 1 links) ∗
+  "Hown_sk" ∷ own_sk obj.(sl_sk) obj.(pk) (serv_sigpred obj.(γ)) ∗
 
-  (* latest updates. *)
-  (* Exists map of slices that own the respective vals. *)
-  "Hmap_sl_updates" ∷ ([∗ map] sl_bytes; bytes ∈ map_sl_updates; (kmap bytes_to_string updates),
-    own_slice_small sl_bytes byteT (DfracOwn 1) bytes) ∗
-  "Hown_updates" ∷ own_map ptr_updates (DfracOwn 1) map_sl_updates ∗
-  "Hupdates" ∷ ptr ↦[server :: "updates"] #ptr_updates ∗
+  "Hown_chain" ∷ epochChain.own ptr_chain chain ∗
+  "%Hlen_nz_chain" ∷ ⌜ length chain.(epochChain.epochs) > 0 ⌝ ∗
+  "#Hvalid_chain" ∷ epochChain.valid obj.(pk) γtrees chain ∗
+  "Hptr_chain" ∷ ptr ↦[server :: "chain"] #ptr_chain ∗
 
-  (* merkle trees. *)
-  "Htrees" ∷ ptr ↦[server :: "trees"] (slice_val sl_ptr_trees) ∗
-  "Hsl_ptr_trees" ∷ own_slice_small sl_ptr_trees ptrT (DfracOwn 1) ptr_trees ∗
-  "Hown_trees" ∷ ([∗ list] ptr_tr; tr ∈ ptr_trees; trees,
-    own_Tree ptr_tr tr) ∗
-  "HmonoTrees" ∷ mono_list_auth_own obj.(γmonoTrees) (1/2) γtrees ∗
-  (* Need view for latest tr to give put promises.
-     For other trees, views let us match up state with global inv. *)
-  "Htree_views" ∷ ([∗ list] γtr; tr ∈ γtrees; (trees ++ [updates]),
-    ghost_map_auth γtr (1/2) tr) ∗
-  (* We could derive this from global_inv, but putting here reduces complexity. *)
-  "#Hdigs" ∷ ([∗ list] tr; dig ∈ trees; digs, is_tree_dig tr dig).
+  (* exists (idS, sl_v) map that owns the respective (id, v) map. *)
+  "#Hsl_updates" ∷ ([∗ map] id ↦ sl_v; v ∈ (kmap string_to_bytes sl_updates); updates,
+    "Hsl_v" ∷ own_slice_small sl_v byteT DfracDiscarded v ∗
+    "%Hlen_id" ∷ ⌜ length id = hash_len ⌝ ) ∗
+  "Hown_updates" ∷ own_map ptr_updates (DfracOwn 1) sl_updates ∗
+  "Hupdates" ∷ ptr ↦[server :: "updates"] #ptr_updates.
 
 Definition valid ptr obj : iProp Σ :=
-  "#Hmu" ∷ ptr ↦[server :: "mu"]□ #obj.(mu) ∗
+  "#Hptr_mu" ∷ ptr ↦[server :: "mu"]□ #obj.(mu) ∗
   "#HmuR" ∷ is_lock nroot #obj.(mu) (own ptr obj) ∗
-  "#Hinv" ∷ inv nroot (global_inv obj.(γmonoLinks) obj.(γmonoTrees)).
-
-End local_defs.
+  "#Hinv" ∷ inv nroot (global_inv obj.(γ)) ∗
+  "#ptr_Hsk" ∷ ptr ↦[server :: "sk"]□ (slice_val obj.(sl_sk)).
+End defs.
 End server.
 
+Section misc.
+Context `{!heapGS Σ, !pavG Σ}.
+Definition servPutReply_valid pk id val (obj : servPutReply.t) : iProp Σ :=
+  (if negb obj.(servPutReply.error) then
+    ∃ link,
+    "#Hlink" ∷ is_hash
+      (chainSepSome.encodesF (chainSepSome.mk
+        (word.sub obj.(servPutReply.putEpoch) (W64 1))
+        obj.(servPutReply.prevLink)
+        obj.(servPutReply.dig)))
+      link ∗
+    "#Hvalid_linkSig" ∷ is_sig pk
+      (servSepLink.encodesF (servSepLink.mk link))
+      obj.(servPutReply.linkSig) ∗
+    "#Hvalid_putSig" ∷ is_sig pk
+      (servSepPut.encodesF (servSepPut.mk obj.(servPutReply.putEpoch) id val))
+      obj.(servPutReply.putSig)
+  else True)%I.
+End misc.
+
 Section proofs.
-Context `{!heapGS Σ, !mono_listG (list w8) Σ, !mono_listG gname Σ, !ghost_mapG Σ (list w8) (list w8)}.
+Context `{!heapGS Σ, !pavG Σ}.
 
 Lemma sep_auth_agree γtrees trees0 trees1 :
   ([∗ list] γtr;tr ∈ γtrees;trees0, ghost_map_auth γtr (1/2) tr) -∗
@@ -101,7 +193,8 @@ Lemma wp_server_put ptr_serv obj_serv sl_id sl_val (id val : list w8) d0 d1 :
   server__put #ptr_serv (slice_val sl_id) (slice_val sl_val)
   {{{
     ptr_reply reply, RET #ptr_reply;
-    "Hreply" ∷ servPutReply.own ptr_reply reply obj_serv.(server.γmonoLinks) obj_serv.(server.γmonoTrees) id val
+    "Hown_reply" ∷ servPutReply.own ptr_reply reply ∗
+    "#Hvalid_reply" ∷ servPutReply_valid obj_serv.(server.pk) id val reply
   }}}.
 Proof.
   rewrite /server__put.
@@ -110,20 +203,24 @@ Proof.
   wp_loadField.
   wp_apply (acquire_spec with "[$HmuR]"); iIntros "[Hlocked Hown_serv]"; iNamed "Hown_serv".
 
+  (* error val. *)
   wp_apply wp_allocStruct; [val_ty|];
     iIntros (ptr_errReply) "Hptr_errReply".
-  iDestruct (struct_fields_split with "Hptr_errReply") as "H"; iNamed "H".
+  iDestruct (struct_fields_split with "Hptr_errReply") as "H";
+    iNamed "H"; iClear "putEpoch prevLink dig linkSig putSig".
   wp_storeField.
-  iAssert (servPutReply.own ptr_errReply (servPutReply.mk 0 [] [] [] [] _) obj_serv.(server.γmonoLinks) obj_serv.(server.γmonoTrees) id val) with "[$error //]" as "HerrReply".
+  set (errReply := servPutReply.mk 0 [] [] [] [] true).
+  iAssert (servPutReply.own ptr_errReply errReply) with "[$error //]" as "Hown_errReply".
+  iAssert (servPutReply_valid obj_serv.(server.pk) id val errReply) with "[//]" as "#Hvalid_errReply".
 
   (* check id len. *)
   wp_apply wp_slice_len.
   wp_if_destruct.
   {
     wp_loadField.
-    (* TODO: debug why this iFrame takes so long. *)
-    wp_apply (release_spec with "[-HΦ HerrReply]"); [iFrame "#∗#"|].
-    wp_pures; by iApply "HΦ".
+    wp_apply (release_spec with "[-HΦ Hown_errReply]").
+    { iFrame "HmuR Hlocked ∗#%". }
+    wp_pures; iApply "HΦ"; by iFrame.
   }
 
   (* check if id was already updated. if not, update. *)
@@ -134,146 +231,194 @@ Proof.
   destruct ok.
   {
     wp_loadField.
-    wp_apply (release_spec with "[-HΦ HerrReply]"); [iFrame "#∗#"|].
-    wp_pures; by iApply "HΦ".
+    wp_apply (release_spec with "[-HΦ Hown_errReply]").
+    { iFrame "HmuR Hlocked ∗#%". }
+    wp_pures; iApply "HΦ"; by iFrame.
   }
   wp_loadField.
   wp_apply (wp_MapInsert_to_val with "[$Hown_updates]"); iIntros "Hown_updates".
 
   (* prepare put promise. *)
   wp_loadField.
+  iNamed "Hown_chain".
+  wp_loadField.
   wp_apply wp_slice_len.
-  wp_pures.
   wp_apply wp_allocStruct; [val_ty|];
     iIntros (ptr_putPre_obj) "Hptr_putPre_obj".
-  wp_apply (servSepPut.wp_encode with "[Hptr_putPre_obj Hid Hval]").
+  iMod (own_slice_small_persist with "Hval") as "#Hval".
+  iDestruct (own_slice_small_sz with "Hid") as %Hlen_sz_id.
+  wp_apply (servSepPut.wp_encode with "[Hptr_putPre_obj Hid]").
   {
     iDestruct (struct_fields_split with "Hptr_putPre_obj") as "H"; iNamed "H".
     instantiate (1:=servSepPut.mk _ _ _).
     rewrite /servSepPut.own /=.
-    iExists sl_id, sl_val; iFrame.
+    iExists sl_id, sl_val; iFrame "∗#".
   }
   iIntros (sl_putPre putPre) "H"; iNamed "H";
     iRename "Hobj" into "Hptr_putPre";
     iRename "Hsl_enc" into "Hsl_putPre";
     move: Henc => Henc_putPre.
-  replace (word.add (word.sub sl_ptr_trees.(Slice.sz) (W64 1)) (W64 1)) with (sl_ptr_trees.(Slice.sz)) in Henc_putPre by ring.
+  replace (word.add (word.sub sl_epochs.(Slice.sz) (W64 1)) (W64 1)) with (sl_epochs.(Slice.sz)) in * by ring.
+  wp_loadField.
+  (* load chain lengths. *)
+  iNamed "Hvalid_chain".
+  iDestruct (big_sepL2_length with "Hvalid_sep_chain") as %Hlen_gammas_chain.
+  iDestruct (own_slice_small_sz with "Hsl_epochs") as %Hlen_sl_epochs.
+  iDestruct (big_sepL2_length with "Hsep_epochs") as %Hlen_ptr_epochs.
 
   (* get resources for put sigpred. *)
   (* get γtree mono_list_idx_own. *)
-  iDestruct (own_slice_small_sz with "Hsl_ptr_trees") as %Hlen0.
-  iDestruct (big_sepL2_length with "Hown_trees") as %Hlen1.
-  iDestruct (big_sepL2_length with "Htree_views") as %Hlen2.
-  rewrite app_length/= in Hlen2.
-  assert (uint.nat sl_ptr_trees.(Slice.sz) < length γtrees) as Hinb by lia.
-  apply lookup_lt_is_Some in Hinb as [γtree Hlook0].
-  iDestruct (mono_list_idx_own_get with "[HmonoTrees]") as "#Hidx_γtree".
+  iDestruct (mono_list_idx_own_get (uint.nat sl_epochs.(Slice.sz)) γupdates with
+    "[HmonoTrees]") as "#Hidx_γupdates".
   2: iApply (mono_list_lb_own_get with "HmonoTrees").
-  1: done.
-  (* open invariant to get even more info. *)
+  { apply lookup_snoc_Some; eauto with lia. }
+  (* open global_inv. *)
   wp_apply ncfupd_wp.
   iRename "HmonoTrees" into "HmonoTrees0".
-  iRename "Htree_views" into "Htree_views0".
-  iInv "Hinv" as "> H" "Hclose".
-  iEval (rewrite /global_inv) in "H".
-  (* TODO: very weird...
-     if we do `iNamed "H".` here with a conflicting hyp name,
-     instead of error'ing out, our goal becomes False.
-     this seems like bad behavior from iris_named_props. *)
-  iRename "Hdigs" into "Hdigs0".
-  iNamed "H".
+  iInv "Hinv" as "> H" "Hclose"; iNamed "H".
+  (* get ghost_map_auth updates in full, so we can update and make put witness. *)
   iDestruct (mono_list_auth_own_agree with "HmonoTrees HmonoTrees0") as %[_ ->].
-  iDestruct (sep_auth_agree with "Htree_views Htree_views0") as %?; list_simplifier.
-  (* get ghost map witness. *)
-  assert ((trees ++ [updates]) !! uint.nat sl_ptr_trees.(Slice.sz) = Some updates) as Hlook1.
-  { apply lookup_snoc_Some; eauto with lia. }
-  iDestruct (big_sepL2_insert_acc with "Htree_views0") as "[Hmap_auth0 Hsep_close0]"; [done..|].
-  iDestruct (big_sepL2_insert_acc with "Htree_views") as "[Hmap_auth1 Hsep_close1]"; [done..|].
-  iCombine "Hmap_auth0 Hmap_auth1" as "Hmap_auth".
+  iDestruct (big_sepL2_length with "Htree_views") as %Hlen0.
+  rewrite app_length in Hlen0.
+  list_simplifier.
+  unshelve (epose proof (list_snoc_exists trees _) as (old_trees & updates0 & ->)); [lia|].
+  iDestruct (big_sepL2_snoc with "Htree_views") as "[Htree_views Hupdates_view0]".
+  iDestruct (ghost_map_auth_agree with "Hupdates_view0 Hupdates_view") as %->.
+  iCombine "Hupdates_view Hupdates_view0" as "Hupdates_view".
   apply map_get_false in Hmap_get as [Hmap_get _].
-  iDestruct (big_sepM2_lookup_l_none with "Hmap_sl_updates") as "%Hmap_get1"; [done|].
-  rewrite lookup_kmap in Hmap_get1.
-  iMod (ghost_map_insert_persist _ val with "Hmap_auth") as "[[Hmap_auth0 Hmap_auth1] #Hwitness]"; [done|].
-  (* make resources look pretty before closing invariant. *)
-  iDestruct ("Hsep_close0" with "Hmap_auth0") as "Htree_views0".
-  iDestruct ("Hsep_close1" with "Hmap_auth1") as "Htree_views1".
-  pose proof (list_insert_id _ _ _ Hlook0) as H;
-    iEval (rewrite H) in "Htree_views0 Htree_views1";
-    clear H.
-  assert (uint.nat sl_ptr_trees.(Slice.sz) = length trees + 0) as H by lia;
-    iEval (rewrite H insert_app_r) in "Htree_views0 Htree_views1";
-    list_simplifier; clear H.
-  iMod ("Hclose" with "[$Hlinks $HmonoTrees $Htree_views1]") as "_"; [iFrame "%#"|].
-  iClear "Hbinds Hdigs".
+  rewrite -(lookup_kmap string_to_bytes) in Hmap_get.
+  iDestruct (big_sepM2_lookup_l_none with "Hsl_updates") as "%Hmap_get1"; [done|].
+  iMod (ghost_map_insert_persist _ val with "Hupdates_view") as
+    "[[Hupdates_view0 Hupdates_view1] #Hwitness]"; [done|].
+  (* rewrite after ghost map insert so it has expanded form.
+    this helps when we later want to do a big sep insert with the expanded form.
+    TODO: this all arises bc we can't rewrite under a big sep map insert. *)
+  rewrite bytes_to_string_to_bytes in Hmap_get, Hmap_get1.
+  iDestruct (big_sepL2_snoc with "[$Htree_views $Hupdates_view0]") as "Htree_views".
+  iMod ("Hclose" with "[$HmonoTrees0 $Htree_views]") as "_".
 
   (* sign put promise. *)
-  iModIntro.
-  wp_loadField.
+  iIntros "!>".
   wp_apply (wp_Sign with "[$Hown_sk $Hsl_putPre]").
-  {
-    iRight.
-    (* TODO: with iFrame "%", it's unfolding mono_list_idx_own,
-       framing the lookup, and left with a mono_list_lb_own, which we don't have.
-       maybe mono_list_idx_own should be more opaque? *)
-    iFrame (Henc_putPre).
-    iFrame "#".
-  }
-  iIntros (sl_putSig putSig) "H";
-    iRename "Hsk" into "Hptr_sk";
-    iNamed "H";
+  { iFrame "Hinv". iRight.
+    iEval (rewrite (bytes_to_string_to_bytes id)) in "Hwitness". iFrame "%#". }
+  iIntros (sl_putSig putSig) "H"; iNamed "H";
     iRename "Hmsg" into "Hsl_putPre";
-    iRename "Hsig" into "HputSig".
+    iRename "Hsig" into "Hvalid_putSig";
+    iRename "Hsl_sig" into "Hsl_putSig".
 
-  (* get all the other data to be returned. *)
+  (* extract resources from chain and return. *)
   wp_loadField.
-  wp_apply (hashChain.wp_getLink with "Hown_chain"); [admit|].
-  iIntros (sl_prev2Link prev2Link) "H";
-    iRename "Hchain" into "Hptr_chain";
-    iNamed "H".
-  remember (word.sub sl_ptr_trees.(Slice.sz) (W64 1)) as currEpoch.
-  remember (word.sub currEpoch (W64 1)) as prevEpoch.
-  assert (links !! uint.nat prevEpoch = Some prev2Link) as Hlook2 by admit.
-  (* TODO: prove by showing in bounds in (drop 1 links) and extracting
-     from mono_list_auth_own. *)
-  iAssert ((⌜ uint.nat currEpoch > 0 ⌝ -∗ mono_list_idx_own obj_serv.(server.γmonoLinks) (uint.nat prevEpoch) prev2Link)%I) as "Hmono_prev2Link"; [admit|].
-
   wp_loadField.
-  assert (∃ ptr_tree, ptr_trees !! uint.nat currEpoch = Some ptr_tree) as [ptr_tree Hlook3] by admit.
-  wp_apply (wp_SliceGet with "[$Hsl_ptr_trees //]"); iIntros "Hsl_ptr_trees".
-  iDestruct (big_sepL2_lookup_1_some with "Hown_trees") as %[tree Htree]; [done|].
-  iDestruct (big_sepL2_lookup_acc with "Hown_trees") as "[Hown_tree Hown_trees_close]"; [done..|].
-  wp_apply (wp_Tree_Digest with "Hown_tree");
-    iIntros (sl_prevDig prevDig) "H"; iNamed "H".
-  assert (digs !! uint.nat currEpoch = Some prevDig) as Hlook4 by admit.
-  assert (∃ prevLink, links !! uint.nat currEpoch = Some prevLink) as [prevLink Hlook5] by admit.
-  iAssert (is_hash (chainSepSome.encodesF (chainSepSome.mk currEpoch prev2Link prevDig)) prevLink) as "Hbind_prevLink"; [admit|].
-  iAssert (mono_list_idx_own obj_serv.(server.γmonoLinks) (uint.nat currEpoch) prevLink) as "Hmono_prevLink"; [admit|].
-
+  pose proof (lookup_lt_is_Some ptr_epochs (uint.nat (word.sub sl_epochs.(Slice.sz) (W64 1)))) as [_ H];
+    unshelve (epose proof (H _) as [ptr_epoch Hidx_ptr_epoch]);
+    [word|]; clear H.
+  wp_apply (wp_SliceGet with "[$Hsl_epochs //]"); iIntros "Hsl_epochs".
+  iDestruct (big_sepL2_lookup_1_some with "Hsep_epochs") as %[chain_epoch Hidx_chain]; [done|].
+  iDestruct (big_sepL2_lookup_acc with "Hsep_epochs") as "[Hown_epoch Hsep_epochs]"; [done..|].
+  iNamed "Hown_epoch".
+  iMod (own_slice_small_persist with "Hsl_prevLink") as "#Hsl_prevLink".
+  iMod (own_slice_small_persist with "Hsl_dig") as "#Hsl_dig".
+  iMod (own_slice_small_persist with "Hsl_linkSig") as "#Hsl_linkSig".
   wp_loadField.
-  iDestruct "Hown_linkSigs" as (linkSigs_dim0) "[HlinkSigs_dim0 Hown_linkSigs]".
-  assert (∃ sl_linkSig, linkSigs_dim0 !! uint.nat currEpoch = Some sl_linkSig) as [sl_linkSig Hlook6] by admit.
-  wp_apply (wp_SliceGet with "[$HlinkSigs_dim0]"); [done|];
-    iIntros "HlinkSigs_dim0".
-
-  (* return. *)
   wp_loadField.
-  iDestruct ("Hown_trees_close" with "Htree") as "Hown_trees".
-  iAssert (own_Slice2D sl_linkSigs (DfracOwn 1) linkSigs) with "[$Hown_linkSigs $HlinkSigs_dim0]" as "Hown_linkSigs".
-  wp_apply (release_spec with "[Hlocked Hptr_sk HlinkSigs Hptr_chain HmonoLinks Hmap_sl_updates Hupdates Htrees HmonoTrees0 Hown_updates Htree_views0 Hsk Hchain Hsl_ptr_trees Hown_trees Hown_linkSigs]"); [admit|].
+  wp_loadField.
+  iDestruct ("Hsep_epochs" with "[$Htr $Hsl_link $Hptr_tr $Hptr_prevLink
+    $Hptr_dig $Hptr_link $Hptr_linkSig]") as "Hsep_epochs"; [iFrame "#"|].
+  iRename "Hsl_updates" into "H";
+    (* write id in expanded form so that we can move it inside the kmap. *)
+    iDestruct (big_sepM2_insert_2 _ _ _ (string_to_bytes (bytes_to_string id)) with "[] H") as "Hsl_updates";
+    iClear "H".
+  { iFrame "Hval". rewrite Heqb in Hlen_sz_id. iPureIntro.
+    rewrite bytes_to_string_to_bytes. word. }
+  iEval (rewrite -kmap_insert) in "Hsl_updates".
+  wp_loadField.
+  wp_apply (release_spec with "[-HΦ Hptr_putPre Hsl_putPre Hsl_putSig]").
+  { (* TODO: some props above would be cleaner if we could rewrite under the insert here. *)
+    iFrame "Hlocked HmuR ∗#%". }
   wp_apply wp_allocStruct; [val_ty|];
     iIntros (ptr_putReply) "Hptr_putReply".
-  iClear "putEpoch prev2Link prevDig linkSig putSig HerrReply".
   iDestruct (struct_fields_split with "Hptr_putReply") as "H"; iNamed "H".
+  replace (word.add (word.sub sl_epochs.(Slice.sz) (W64 1)) (W64 1)) with (sl_epochs.(Slice.sz)) in * by ring.
   iApply "HΦ".
+  iFrame.
   instantiate (1:=servPutReply.mk _ _ _ _ _ _).
   rewrite /servPutReply.own /=.
-  iExists prevLink, sl_prev2Link, sl_prevDig, sl_linkSig, sl_putSig.
   iFrame "∗#".
-  (*
-     first get mono_idx for prevLink.
-     then just need to unify bindings and exhibit mono_idx.
-   *)
-Admitted.
+  iDestruct (big_sepL2_lookup_2_some with "Hvalid_sep_chain") as %[γtree Hidx_γtree]; [done|].
+  iDestruct (big_sepL2_lookup with "Hvalid_sep_chain") as "H"; [done..|]; iNamed "H".
+  iEval (rewrite w64_to_nat_id) in "Hbind".
+  rewrite /servSepPut.encodes in Henc_putPre; subst.
+  iFrame "#".
+Qed.
+
+Lemma wp_applyUpdates ptr_currTr currTr (updates : gmap _ (list w8)) ptr_updates sl_updates d0 :
+  {{{
+    "Hown_currTr" ∷ own_Tree ptr_currTr currTr ∗
+    "#Hsl_updates" ∷ ([∗ map] id ↦ sl_v; v ∈ (kmap string_to_bytes sl_updates); updates,
+      "#Hsl_v" ∷ own_slice_small sl_v byteT DfracDiscarded v ∗
+      "%Hlen_id" ∷ ⌜ length id = hash_len ⌝) ∗
+    "Hown_updates" ∷ own_map ptr_updates d0 sl_updates
+  }}}
+  applyUpdates #ptr_currTr #ptr_updates
+  {{{
+    ptr_nextTr, RET #ptr_nextTr;
+    "Hown_currTr" ∷ own_Tree ptr_currTr currTr ∗
+    "Hown_updates" ∷ own_map ptr_updates d0 sl_updates ∗
+    "Hown_nextTr" ∷ own_Tree ptr_nextTr (updates ∪ currTr)
+  }}}.
+Proof.
+  rewrite /applyUpdates.
+  iIntros (Φ) "H HΦ"; iNamed "H".
+  wp_apply (wp_Tree_DeepCopy with "Hown_currTr");
+    iEval (rewrite /named); iIntros (ptr_nextTr) "[Hown_currTr Hown_nextTr]".
+  set (loopInv := λ (_ sl_mdone : gmap string Slice.t),
+    (∃ mdone,
+    let sl_mdone' := (kmap string_to_bytes sl_mdone) : gmap (list w8) Slice.t in
+    (* these first two properties 'characterize' the following:
+    [Definition map_filter_keyset m S :
+      filter (λ '(k,_), k ∈ S) m.]
+    using the characterization instead of the implementation makes it easier
+    to work with. no rewriting under filter preds. *)
+    "%Hdom" ∷ ⌜ dom mdone = dom sl_mdone' ⌝ ∗
+    "%Hsubset" ∷ ⌜ mdone ⊆ updates ⌝ ∗
+    "Hown_nextTr" ∷ own_Tree ptr_nextTr (mdone ∪ currTr))%I).
+  wp_apply (wp_MapIter_3 _ _ _ _ _ loopInv with "[$Hown_updates] [Hown_nextTr]");
+    rewrite /loopInv {loopInv}.
+  {
+    iExists ∅.
+    rewrite map_empty_union; iFrame.
+    iPureIntro; split.
+    - rewrite kmap_empty. set_solver.
+    - apply map_empty_subseteq.
+  }
+  {
+    iIntros (idS sl_v sl_mtodo sl_mdone Φ0) "!> [H1 %H2] HΦ0";
+      iNamed "H1"; destruct H2 as (Hunion & Hdom1 & Hlook0).
+    wp_apply wp_StringToBytes; iIntros (sl_idS) "H";
+      iDestruct (own_slice_to_small with "H") as "Hsl_idS".
+    apply (lookup_union_Some_l _ sl_mdone) in Hlook0; rewrite -Hunion in Hlook0.
+    rewrite -(lookup_kmap string_to_bytes) in Hlook0.
+    iDestruct (big_sepM2_lookup_l with "Hsl_updates") as (v) "[%Hlook1 H]";
+      [done|]; iNamed "H".
+    wp_apply (wp_Tree_Put with "[$Hown_nextTr $Hsl_idS $Hsl_v]");
+      iIntros "*"; iNamed 1.
+    pose proof (Hvalid_id Hlen_id) as ->; simpl; iNamed "Herr".
+    wp_apply wp_Assert_true.
+    iApply "HΦ0".
+    iExists (<[string_to_bytes idS:=v]>mdone).
+    rewrite -insert_union_l; iFrame.
+    iPureIntro; split.
+    - rewrite kmap_insert. set_solver.
+    - by apply insert_subseteq_l.
+  }
+  iIntros "[Hown_updates H]"; iNamed "H".
+  wp_pures; iApply "HΦ".
+  iDestruct (big_sepM2_dom with "Hsl_updates") as %Hdom1.
+  assert (mdone = updates) as ->.
+  { apply subseteq_dom_eq; set_solver. }
+  by iFrame.
+Qed.
 
 Lemma wp_server_updateEpoch ptr_serv obj_serv :
   {{{
@@ -283,6 +428,79 @@ Lemma wp_server_updateEpoch ptr_serv obj_serv :
   {{{
     RET #(); True
   }}}.
-Proof. Admitted.
+Proof.
+  rewrite /server__updateEpoch.
+  iIntros (Φ) "H HΦ"; iNamed "H"; iNamed "Hvalid_serv".
+  wp_loadField.
+  wp_apply (acquire_spec with "[$HmuR]"); iIntros "[Hlocked Hown_serv]"; iNamed "Hown_serv".
+
+  (* index epochChain. *)
+  wp_loadField.
+  iNamed "Hown_chain".
+  wp_loadField.
+  wp_apply wp_slice_len.
+  wp_loadField.
+  wp_loadField.
+  iDestruct (own_slice_small_sz with "Hsl_epochs") as %Hlen_sl_ptr_epochs.
+  iDestruct (big_sepL2_length with "Hsep_epochs") as %Hlen_ptr_epochs_chain.
+  pose proof (lookup_lt_is_Some ptr_epochs (uint.nat (word.sub sl_epochs.(Slice.sz) (W64 1)))) as [_ H];
+    unshelve (epose proof (H _) as [ptr_epoch Hidx_ptr_epoch]);
+    [word|]; clear H.
+  wp_apply (wp_SliceGet with "[$Hsl_epochs //]"); iIntros "Hsl_epochs".
+  iDestruct (big_sepL2_lookup_1_some with "Hsep_epochs") as %[epoch_info Hidx_epoch_info]; [done|].
+  iDestruct (big_sepL2_lookup_acc with "Hsep_epochs") as "[Hown_epoch Hsep_epochs]";
+    [done..|]; iNamed "Hown_epoch".
+  wp_loadField.
+  wp_loadField.
+  wp_apply (wp_applyUpdates with "[$Htr $Hown_updates $Hsl_updates]");
+    iIntros (ptr_nextTr); iNamed 1.
+  wp_loadField.
+  wp_loadField.
+  iDestruct ("Hsep_epochs" with
+    "[$Hsl_prevLink $Hsl_dig $Hsl_link $Hsl_linkSig $Hptr_tr $Hptr_prevLink $Hptr_dig
+    $Hptr_link $Hptr_linkSig $Hown_currTr]") as "Hown_epochs".
+
+  (* ghost_map_auth needs to match nextTr. *)
+  wp_apply ncfupd_wp.
+  iRename "HmonoTrees" into "HmonoTrees0".
+  iInv "Hinv" as "> H" "Hclose"; iNamed "H".
+  iDestruct (mono_list_auth_own_agree with "HmonoTrees HmonoTrees0") as %[_ ->].
+  iDestruct (big_sepL2_length with "Htree_views") as %Hlen0.
+  rewrite app_length in Hlen0.
+  list_simplifier.
+  unshelve (epose proof (list_snoc_exists trees _) as (old_trees & updates0 & ->)); [lia|].
+  (* we could do this with insert / delete, but snoc makes it easier to
+  unify the ghost state when closing the inv.
+  just pop the last off and push it back on. *)
+  iDestruct (big_sepL2_snoc with "Htree_views") as "[Htree_views Hupdates_view0]".
+  iDestruct (ghost_map_auth_agree with "Hupdates_view0 Hupdates_view") as %->.
+  iCombine "Hupdates_view Hupdates_view0" as "Hupdates_view".
+  iMod (ghost_map_apply_on epoch_info.(epochInfo.tree) with "Hupdates_view") as "[[Hauth_nextTr0 Hauth_nextTr] _]".
+  iDestruct (big_sepL2_snoc with "[$Htree_views $Hauth_nextTr0]") as "Htree_views".
+  (* also, make a new ghost_map since we're opening up a new epoch. *)
+  iMod ghost_map_alloc_empty as (γempty) "[Hauth_empty Hauth_empty0]".
+  iDestruct (big_sepL2_snoc with "[$Htree_views $Hauth_empty0]") as "Htree_views".
+  iCombine "HmonoTrees HmonoTrees0" as "HmonoTrees".
+  iMod (mono_list_auth_own_update_app [∅] with "HmonoTrees") as "[[HmonoTrees0 HmonoTrees] #Hmono_lb]".
+  iMod ("Hclose" with "[$HmonoTrees0 $Htree_views]") as "_".
+  iIntros "!>".
+
+  (* epochChain.put. *)
+  iMod (ghost_map_auth_persist with "Hauth_nextTr") as "#Hpers_nextTr".
+  wp_apply (epochChain.wp_put with
+    "[$Hown_epochs $Hown_nextTr $Hown_sk $Hsl_epochs $Hptr_epochs]");
+    [iFrame "#"|]; iClear "Hvalid_chain"; iIntros (new_info); iNamed 1.
+  wp_apply wp_NewMap; iIntros (ptr_new_updates) "Hown_new_updates".
+  wp_storeField.
+  wp_loadField.
+  wp_apply (release_spec with "[-HΦ]").
+  {
+    iFrame "HmuR Hlocked ∗#%".
+    iSplit.
+    - iPureIntro. rewrite app_length. lia.
+    - eauto.
+  }
+  wp_pures. by iApply "HΦ".
+Qed.
 
 End proofs.

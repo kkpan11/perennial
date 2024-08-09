@@ -33,8 +33,7 @@ jobs:
           install: |
             startGroup Install dependencies
               sudo apt-get update
-              sudo apt-get install -y python3 python3-pip python3-pandas sqlite3
-              pip3 install -r etc/requirements.txt
+              sudo apt-get install -y python3 python3-pandas sqlite3
             endGroup
           # for permissions issue, see: https://github.com/coq-community/docker-coq-action#permissions.
           before_script: |
@@ -73,8 +72,7 @@ jobs:
           install: |
             startGroup Install dependencies
               sudo apt-get update
-              sudo apt-get install -y python3 python3-pip python3-pandas sqlite3
-              pip3 install -r etc/requirements.txt
+              sudo apt-get install -y python3 python3-pandas sqlite3
             endGroup
           before_script: |
             sudo chown -R coq:coq .
@@ -105,5 +103,26 @@ jobs:
           go-version: "1.22"
           # repo doesn't have go.sum file. nothing to cache.
           cache: false
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install .
       - name: check that Goosed files are clean
-        run: etc/ci-goose-check.sh
+        run: etc/ci-goose-check.py
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install .
+      - name: Format
+        run: ruff format --diff ./
+      - name: Lint
+        run: ruff check ./
